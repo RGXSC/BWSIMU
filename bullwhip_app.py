@@ -22,7 +22,7 @@ class BullwhipSimulator:
                            200,200,200,200,200,200,200,200,200,200,
                            200,200,200,200,200]
     
-    def simulate(self, bias, panic, lt_usine, stock_init_mag, stock_init_ent, stock_init_usi, pv=125, pc=30):
+    def simulate(self, panic, lt_usine, stock_init_mag, stock_init_ent, stock_init_usi, pv=125, pc=30):
         lt1, lt2, lt3 = 1, 1, lt_usine
         
         if pc >= pv:
@@ -187,7 +187,6 @@ class BullwhipSimulator:
             },
             'valid': valid,
             'params': {
-                'bias': bias, 
                 'panic': panic, 
                 'lt_usine': lt_usine,
                 'stock_init_mag': stock_init_mag,
@@ -200,8 +199,7 @@ class BullwhipSimulator:
 # SIDEBAR
 st.sidebar.header("⚙️ Paramètres de Simulation")
 
-bias = st.sidebar.select_slider("Bias Prévision Initial", 
-                                 options=[0.5, 1.0, 1.5, 2.0], value=1.0)
+# ✅ BIAS SUPPRIMÉ
 panic = st.sidebar.select_slider("Multiplicateur Panique", 
                                   options=[1, 2, 3], value=2)
 lt_usine = st.sidebar.select_slider("Délai Production (sem)", 
@@ -221,43 +219,40 @@ st.sidebar.info(f"🏭 **Limite usine: 1000 pièces/semaine**")
 
 if st.sidebar.button("▶ LANCER SIMULATION (24 semaines)", type="primary"):
     sim = BullwhipSimulator()
-    result = sim.simulate(bias, panic, lt_usine, stock_init_mag, stock_init_ent, stock_init_usi, pv, pc)
+    result = sim.simulate(panic, lt_usine, stock_init_mag, stock_init_ent, stock_init_usi, pv, pc)
     st.session_state['result'] = result
 
-# ✅ TESTS COMPLETS : 4×3×3×3×3×3 = 972 combinaisons
-if st.sidebar.button("🔬 LANCER TESTS COMPLETS (972 combinaisons)", type="secondary"):
-    with st.spinner('Tests en cours... (972 combinaisons - peut prendre 1-2 minutes)'):
+# ✅ TESTS COMPLETS : 3×3×3×3×3 = 243 combinaisons (sans Bias)
+if st.sidebar.button("🔬 LANCER TESTS COMPLETS (243 combinaisons)", type="secondary"):
+    with st.spinner('Tests en cours... (243 combinaisons)'):
         sim = BullwhipSimulator()
         results = []
         progress = st.progress(0)
         count = 0
-        total = 4 * 3 * 3 * 3 * 3 * 3  # 972
+        total = 3 * 3 * 3 * 3 * 3  # 243
         
-        for b in [0.5, 1.0, 1.5, 2.0]:
-            for p in [1, 2, 3]:
-                for lt in [2, 6, 10]:
-                    # ✅ TOUTES LES COMBINAISONS DE STOCKS
-                    for s_mag in [100, 500, 1000]:
-                        for s_ent in [100, 500, 1000]:
-                            for s_usi in [100, 500, 1000]:
-                                r = sim.simulate(b, p, lt, s_mag, s_ent, s_usi, pv, pc)
-                                if r['valid']:
-                                    results.append({
-                                        'Bias': r['params']['bias'],
-                                        'Panic': r['params']['panic'],
-                                        'LT Usine': r['params']['lt_usine'],
-                                        'Stock Magasin': r['params']['stock_init_mag'],
-                                        'Stock Entrepôt': r['params']['stock_init_ent'],
-                                        'Stock Usine': r['params']['stock_init_usi'],
-                                        'CA (K€)': round(r['kpis']['ca'], 1),
-                                        'Marge Réelle (K€)': round(r['kpis']['marge'], 1),
-                                        'Ventes Perdues (K€)': round(r['kpis']['ventes_perdues'], 1),
-                                        'Stock Restant (€)': int(r['kpis']['stock_restant_euros']),
-                                        'Bullwhip': round(r['kpis']['bullwhip'], 2),
-                                        'Service (%)': round(r['kpis']['service_level'], 1)
-                                    })
-                                count += 1
-                                progress.progress(count / total)
+        for p in [1, 2, 3]:
+            for lt in [2, 6, 10]:
+                for s_mag in [100, 500, 1000]:
+                    for s_ent in [100, 500, 1000]:
+                        for s_usi in [100, 500, 1000]:
+                            r = sim.simulate(p, lt, s_mag, s_ent, s_usi, pv, pc)
+                            if r['valid']:
+                                results.append({
+                                    'Panic': r['params']['panic'],
+                                    'LT Usine': r['params']['lt_usine'],
+                                    'Stock Magasin': r['params']['stock_init_mag'],
+                                    'Stock Entrepôt': r['params']['stock_init_ent'],
+                                    'Stock Usine': r['params']['stock_init_usi'],
+                                    'CA (K€)': round(r['kpis']['ca'], 1),
+                                    'Marge Réelle (K€)': round(r['kpis']['marge'], 1),
+                                    'Ventes Perdues (K€)': round(r['kpis']['ventes_perdues'], 1),
+                                    'Stock Restant (€)': int(r['kpis']['stock_restant_euros']),
+                                    'Bullwhip': round(r['kpis']['bullwhip'], 2),
+                                    'Service (%)': round(r['kpis']['service_level'], 1)
+                                })
+                            count += 1
+                            progress.progress(count / total)
         
         st.session_state['test_results'] = pd.DataFrame(results)
         progress.empty()
@@ -337,7 +332,7 @@ if 'result' in st.session_state and st.session_state['result'] is not None:
         else:
             st.error("❌ Problèmes détectés")
 
-# ✅ AFFICHAGE TESTS AVEC TOUTES LES COMBINAISONS DE STOCKS
+# AFFICHAGE TESTS
 if 'test_results' in st.session_state and st.session_state['test_results'] is not None:
     df_test = st.session_state['test_results']
     
@@ -370,7 +365,7 @@ if 'test_results' in st.session_state and st.session_state['test_results'] is no
         st.download_button(
             label="📊 Télécharger en Excel",
             data=excel_data,
-            file_name="bullwhip_simulation_results_972.xlsx",
+            file_name="bullwhip_simulation_results_243.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
@@ -378,10 +373,10 @@ if 'test_results' in st.session_state and st.session_state['test_results'] is no
         
         with col_top:
             st.markdown("### 🏆 Top 10 Meilleure Marge")
-            top10 = df_test.nlargest(10, 'Marge Réelle (K€)')[['Bias', 'Panic', 'LT Usine', 'Stock Magasin', 'Stock Entrepôt', 'Stock Usine', 'Marge Réelle (K€)', 'CA (K€)']]
+            top10 = df_test.nlargest(10, 'Marge Réelle (K€)')[['Panic', 'LT Usine', 'Stock Magasin', 'Stock Entrepôt', 'Stock Usine', 'Marge Réelle (K€)', 'CA (K€)']]
             st.dataframe(top10, use_container_width=True)
         
         with col_bottom:
             st.markdown("### ⚠️ Top 10 Pire Marge")
-            bottom10 = df_test.nsmallest(10, 'Marge Réelle (K€)')[['Bias', 'Panic', 'LT Usine', 'Stock Magasin', 'Stock Entrepôt', 'Stock Usine', 'Marge Réelle (K€)', 'Ventes Perdues (K€)']]
+            bottom10 = df_test.nsmallest(10, 'Marge Réelle (K€)')[['Panic', 'LT Usine', 'Stock Magasin', 'Stock Entrepôt', 'Stock Usine', 'Marge Réelle (K€)', 'Ventes Perdues (K€)']]
             st.dataframe(bottom10, use_container_width=True)

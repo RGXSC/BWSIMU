@@ -2,381 +2,807 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from io import BytesIO
 
-st.set_page_config(page_title="Simulateur Effet Bullwhip", layout="wide")
+st.set_page_config(page_title="Simulateur Bullwhip - Mode Pas-à-Pas", layout="wide")
 
 st.markdown("""
 <div style='text-align: center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
             padding: 30px; border-radius: 15px; margin-bottom: 30px;'>
-    <h1 style='color: white; margin: 0;'>🔄 Simulateur Effet Bullwhip</h1>
-    <p style='color: #f0f0f0; margin: 10px 0 0 0;'>Beer Game Supply Chain Dynamics - 24 Weeks Simulation</p>
+    <h1 style='color: white; margin: 0;'>🔄 Simulateur Bullwhip - Mode Pas-à-Pas</h1>
+    <p style='color: #f0f0f0; margin: 10px 0 0 0;'>Visualisation détaillée étape par étape de la Supply Chain</p>
 </div>
 """, unsafe_allow_html=True)
 
 class BullwhipSimulator:
     def __init__(self):
-        self.W = 24
-        self.MAX_FACTORY_DEMAND = 1000
-        self.DEMAND_BASE = [0,100,200,300,350,380,400,350,280,220,
-                           200,200,200,200,200,200,200,200,200,200,
-                           200,200,200,200,200]
+        self.W = 52
+        self.MAX_WEEKLY_CAPACITY = 5000
+        
+        # Demande simplifiée
+        self.DEMAND_BASE = [0]
+        for i in range(3):
+            self.DEMAND_BASE.append(100)
+        for i in range(4):
+            self.DEMAND_BASE.append(500)
+        for i in range(2):
+            self.DEMAND_BASE.append(100)
+        while len(self.DEMAND_BASE) <= self.W:
+            self.DEMAND_BASE.append(100)
+        
+        self.DEMAND_BASE = np.array(self.DEMAND_BASE, dtype=float)
+        self.MAX_DEMAND = np.max(self.DEMAND_BASE)
     
-    def simulate(self, panic, lt_usine, stock_init_mag, stock_init_ent, stock_init_usi, pv=125, pc=30):
-        lt1, lt2, lt3 = 1, 1, lt_usine
+    def simulate_full(self, panic, lt_usine, lt_fournisseur, 
+                      freq_retail, freq_supply,
+                      stock_mag, stock_ent, stock_usi, stock_four, 
+                      pv=200, pc=30):
         
-        if pc >= pv:
-            return {'data': pd.DataFrame(), 'kpis': {}, 'valid': False, 'params': {}}
+        demand = np.array(self.DEMAND_BASE[:self.W + 1], dtype=float)
         
-        demand_np = np.array(self.DEMAND_BASE[:self.W + 1], dtype=float)
-        demand_np[0] = 0
+        lt = {'mag': 1, 'ent': 1, 'usi': lt_usine, 'four': lt_fournisseur}
         
-        s_mag = stock_init_mag
-        s_ent = stock_init_ent
-        s_usi = stock_init_usi
+        s = {'mag': int(stock_mag), 'ent': int(stock_ent), 
+             'usi': int(stock_usi), 'four': int(stock_four)}
         
-        t_mag, t_ent, t_prd = {}, {}, {}
-        data = []
-        total_cost = 0
-        total_ca = 0
+        backlog = {'mag': 0.0, 'ent': 0.0, 'usi': 0.0, 'four': 0.0}
+        pipe = {'mag': {}, 'ent': {}, 'usi': {}, 'four': {}}
+        outstanding = {'mag': 0.0, 'ent': 0.0, 'usi': 0.0, 'four': 0.0}
+        
+        ORDER_CAP = self.MAX_WEEKLY_CAPACITY
+        
+        initial_fc = 100
+        forecast = {'mag': initial_fc, 'ent': initial_fc, 'usi': initial_fc, 'four': initial_fc}
+        history = {'mag': [initial_fc, initial_fc], 'ent': [initial_fc, initial_fc],
+                   'usi': [initial_fc, initial_fc], 'four': [initial_fc, initial_fc]}
+        
+        all_weeks_data = []
         
         for t in range(self.W + 1):
-            dem = int(demand_np[t])
+            week_log = {'t': t, 'events': []}
+            dem = int(demand[t])
             
-            # Réceptions
-            s_mag += t_mag.get(t, 0)
-            s_ent += t_ent.get(t, 0)
-            s_usi += t_prd.get(t, 0)
+            # 1. RÉCEPTIONS
+            arrivals = {'mag': 0, 'ent': 0, 'usi': 0, 'four': 0}
+            for level in ['mag', 'ent', 'usi', 'four']:
+                arrival = int(pipe[level].get(t, 0))
+                if arrival > 0:
+                    s[level] += arrival
+                    arrivals[level] = arrival
+                    week_log['events'].append(f"📥 {level.upper()}: Réception de {arrival} pcs")
+                    if t in pipe[level]:
+                        del pipe[level][t]
             
-            # Ventes
-            vnt = min(dem, s_mag)
-            perd = dem - vnt
-            s_mag -= vnt
+            week_log['events'].append(f"📋 MAGASIN: Demande client = {dem} pcs")
             
-            total_ca += vnt * pv
+            # 2. VENTES
+            available = max(0, s['mag'])
+            total_demand = dem + backlog['mag']
+            sales = min(total_demand, available)
+            s['mag'] -= sales
             
-            # COMMANDE MAGASIN
-            cmd_mag = 0
+            if sales < total_demand:
+                lost = total_demand - sales
+                backlog['mag'] = 0
+                week_log['events'].append(f"❌ MAGASIN: Ventes perdues = {int(lost)} pcs")
+            else:
+                backlog['mag'] = 0
+            
+            if sales > 0:
+                week_log['events'].append(f"✅ MAGASIN: Ventes = {int(sales)} pcs")
+            
+            # 3. LIVRAISONS
+            shipments = {'mag': 0, 'ent': 0, 'usi': 0, 'four': 0}
+            
+            # ENTREPÔT → MAGASIN
+            if outstanding['mag'] > 1:
+                available_stock = max(0, s['ent'])
+                if available_stock > 0:
+                    shipment = min(int(outstanding['mag']), available_stock, self.MAX_WEEKLY_CAPACITY)
+                    if shipment > 0:
+                        s['ent'] -= shipment
+                        arrival_week = t + lt['mag']
+                        pipe['mag'][arrival_week] = int(pipe['mag'].get(arrival_week, 0) + shipment)
+                        outstanding['mag'] -= shipment
+                        shipments['mag'] = shipment
+                        week_log['events'].append(f"🚚 ENTREPÔT → MAGASIN: Expédition de {shipment} pcs (arrive sem {arrival_week})")
+            
+            # USINE → ENTREPÔT
+            if outstanding['ent'] > 1:
+                available_stock = max(0, s['usi'])
+                if available_stock > 0:
+                    shipment = min(int(outstanding['ent']), available_stock, self.MAX_WEEKLY_CAPACITY)
+                    if shipment > 0:
+                        s['usi'] -= shipment
+                        arrival_week = t + lt['ent']
+                        pipe['ent'][arrival_week] = int(pipe['ent'].get(arrival_week, 0) + shipment)
+                        outstanding['ent'] -= shipment
+                        shipments['ent'] = shipment
+                        week_log['events'].append(f"🚚 USINE → ENTREPÔT: Expédition de {shipment} pcs (arrive sem {arrival_week})")
+            
+            # FOURNISSEUR → USINE
+            if outstanding['usi'] > 1:
+                available_stock = max(0, s['four'])
+                if available_stock > 0:
+                    shipment = min(int(outstanding['usi']), available_stock, self.MAX_WEEKLY_CAPACITY)
+                    if shipment > 0:
+                        s['four'] -= shipment
+                        arrival_week = t + lt['usi']
+                        pipe['usi'][arrival_week] = int(pipe['usi'].get(arrival_week, 0) + shipment)
+                        outstanding['usi'] -= shipment
+                        shipments['usi'] = shipment
+                        week_log['events'].append(f"🚚 FOURNISSEUR → USINE: Expédition de {shipment} pcs (arrive sem {arrival_week})")
+            
+            # PRODUCTION
+            if outstanding['four'] > 1:
+                production = min(int(outstanding['four']), self.MAX_WEEKLY_CAPACITY)
+                if production > 0:
+                    arrival_week = t + lt['four']
+                    pipe['four'][arrival_week] = int(pipe['four'].get(arrival_week, 0) + production)
+                    outstanding['four'] -= production
+                    shipments['four'] = production
+                    week_log['events'].append(f"🏭 FOURNISSEUR: Production de {production} pcs (arrive sem {arrival_week})")
+            
+            # 4. FORECAST
             if t > 0:
-                fc = demand_np[max(1, t-2):t+1].mean()
-                target = fc * (lt1 + 1)
+                history['mag'].append(dem)
+                history['mag'] = history['mag'][-2:]
+                h0 = history['mag'][0] if len(history['mag']) > 0 else 0
+                h1 = history['mag'][1] if len(history['mag']) > 1 else h0
                 
-                if s_mag < target:
-                    stock_gap = target - s_mag
-                    cmd_mag = dem + (stock_gap * 0.3)
+                if panic == 1:
+                    forecast['mag'] = h0 * 0.5 + h1 * 0.5
+                elif panic == 2:
+                    forecast['mag'] = h0 * 0.25 + h1 * 0.75
                 else:
-                    cmd_mag = dem * 0.3
+                    forecast['mag'] = h0 * 0.05 + h1 * 0.95
                 
-                if panic > 1 and perd > dem * 0.1:
-                    cmd_mag *= panic
-                
-                cmd_mag = min(cmd_mag, fc * 30)
-                if t > self.W * 0.85: 
-                    cmd_mag *= 0.1
+                week_log['events'].append(f"📊 MAGASIN: Nouveau forecast = {int(forecast['mag'])} pcs")
             
-            # COMMANDE ENTREPÔT
-            cmd_ent = 0
-            if t > 1:
-                past_mag = [d['cmd_mag'] for d in data[max(0, t-2):t]]
-                fc_ent = np.mean(past_mag) if past_mag else 0
-                target_ent = fc_ent * (lt2 + 1)
+            # 5. COMMANDES
+            cmd = {'mag': 0, 'ent': 0, 'usi': 0, 'four': 0}
+            target_level = {'mag': 0, 'ent': 0, 'usi': 0, 'four': 0}
+            
+            # MAGASIN → ENTREPÔT
+            if t % freq_retail == 0 and t > 0:
+                L = lt['mag']
+                fc = forecast['mag']
+                R = freq_retail
+                target = fc * (L + R)
+                target_level['mag'] = target
                 
-                if s_ent < target_ent:
-                    stock_gap = target_ent - s_ent
-                    anchor_ent = past_mag[-1] if past_mag else 0
-                    cmd_ent = anchor_ent + (stock_gap * 0.3)
+                inv_pos = s['mag'] + sum(pipe['mag'].values()) + outstanding['mag'] - backlog['mag']
+                order = max(0, target - inv_pos)
+                order = min(int(order), ORDER_CAP)
+                
+                if order > 0:
+                    cmd['mag'] = order
+                    outstanding['mag'] += order
+                    week_log['events'].append(f"🛒 MAGASIN → ENTREPÔT: Commande de {order} pcs")
+            
+            # ENTREPÔT → USINE
+            if t % freq_retail == 0 and t > 0:
+                observed = cmd['mag'] if cmd['mag'] > 0 else forecast['mag']
+                history['ent'].append(observed)
+                history['ent'] = history['ent'][-2:]
+                h0 = history['ent'][0] if len(history['ent']) > 0 else 0
+                h1 = history['ent'][1] if len(history['ent']) > 1 else h0
+                
+                if panic == 1:
+                    forecast['ent'] = h0 * 0.5 + h1 * 0.5
+                elif panic == 2:
+                    forecast['ent'] = h0 * 0.25 + h1 * 0.75
                 else:
-                    cmd_ent = fc_ent * 0.3
+                    forecast['ent'] = h0 * 0.05 + h1 * 0.95
                 
-                if panic > 1 and len(past_mag) >= 2:
-                    if past_mag[-1] > np.mean(past_mag[:-1]) * 1.3:
-                        cmd_ent *= (1 + (panic - 1) * 0.7)
+                L = lt['ent']
+                fc = forecast['ent']
+                R = freq_retail
+                target = fc * (L + R)
+                target_level['ent'] = target
                 
-                cmd_ent = min(cmd_ent, fc_ent * 25)
-                if t > self.W * 0.85: 
-                    cmd_ent *= 0.1
+                inv_pos = s['ent'] + sum(pipe['ent'].values()) + outstanding['ent']
+                order = max(0, target - inv_pos)
+                order = min(int(order), ORDER_CAP)
+                
+                if order > 0:
+                    cmd['ent'] = order
+                    outstanding['ent'] += order
+                    week_log['events'].append(f"🛒 ENTREPÔT → USINE: Commande de {order} pcs")
             
-            # COMMANDE USINE
-            cmd_usi = 0
-            if t > 1:
-                past_ent = [d['cmd_ent'] for d in data[max(0, t-2):t]]
-                fc_usi = np.mean(past_ent) if past_ent else 0
+            # USINE → FOURNISSEUR
+            if t % freq_supply == 0 and t > 0:
+                observed = cmd['ent'] if cmd['ent'] > 0 else forecast['ent']
+                history['usi'].append(observed)
+                history['usi'] = history['usi'][-2:]
+                h0 = history['usi'][0] if len(history['usi']) > 0 else 0
+                h1 = history['usi'][1] if len(history['usi']) > 1 else h0
                 
-                safety_stock = fc_usi * lt3
-                target_stock = safety_stock + fc_usi
-                
-                if s_usi < target_stock:
-                    needed = target_stock - s_usi
-                    current_demand = past_ent[-1] if past_ent else 0
-                    cmd_usi = max(current_demand, needed * 0.5)
+                if panic == 1:
+                    forecast['usi'] = h0 * 0.5 + h1 * 0.5
+                elif panic == 2:
+                    forecast['usi'] = h0 * 0.25 + h1 * 0.75
                 else:
-                    cmd_usi = fc_usi * 0.2
+                    forecast['usi'] = h0 * 0.05 + h1 * 0.95
                 
-                if panic > 1 and len(past_ent) >= 2:
-                    if past_ent[-1] > np.mean(past_ent[:-1]) * 1.3 and s_usi < target_stock:
-                        cmd_usi *= (1 + (panic - 1) * 0.5)
+                L = lt['usi']
+                fc = forecast['usi']
+                R = freq_supply
+                target = fc * (L + R)
+                target_level['usi'] = target
                 
-                cmd_usi = min(cmd_usi, fc_usi * 20)
-                cmd_usi = min(cmd_usi, self.MAX_FACTORY_DEMAND)
+                inv_pos = s['usi'] + sum(pipe['usi'].values()) + outstanding['usi']
+                order = max(0, target - inv_pos)
+                order = min(int(order), ORDER_CAP)
                 
-                if t > self.W * 0.85: 
-                    cmd_usi *= 0.05
+                if order > 0:
+                    cmd['usi'] = order
+                    outstanding['usi'] += order
+                    week_log['events'].append(f"🛒 USINE → FOURNISSEUR: Commande de {order} pcs")
             
-            # Flux physiques
-            shp_m = min(int(np.round(cmd_mag)), s_ent)
-            s_ent -= shp_m
-            t_mag[t + lt1] = t_mag.get(t + lt1, 0) + shp_m
+            # FOURNISSEUR
+            if t % freq_supply == 0 and t > 0:
+                observed = cmd['usi'] if cmd['usi'] > 0 else forecast['usi']
+                history['four'].append(observed)
+                history['four'] = history['four'][-2:]
+                h0 = history['four'][0] if len(history['four']) > 0 else 0
+                h1 = history['four'][1] if len(history['four']) > 1 else h0
+                
+                if panic == 1:
+                    forecast['four'] = h0 * 0.5 + h1 * 0.5
+                elif panic == 2:
+                    forecast['four'] = h0 * 0.25 + h1 * 0.75
+                else:
+                    forecast['four'] = h0 * 0.05 + h1 * 0.95
+                
+                L = lt['four']
+                fc = forecast['four']
+                R = freq_supply
+                target = fc * (L + R)
+                target_level['four'] = target
+                
+                inv_pos = s['four'] + sum(pipe['four'].values()) + outstanding['four']
+                order = max(0, target - inv_pos)
+                order = min(int(order), ORDER_CAP)
+                
+                if order > 0:
+                    cmd['four'] = order
+                    outstanding['four'] += order
+                    week_log['events'].append(f"🛒 FOURNISSEUR: Planification production de {order} pcs")
             
-            shp_e = min(int(np.round(cmd_ent)), s_usi)
-            s_usi -= shp_e
-            t_ent[t + lt2] = t_ent.get(t + lt2, 0) + shp_e
-            
-            prd = int(np.round(cmd_usi))
-            t_prd[t + lt3] = t_prd.get(t + lt3, 0) + prd
-            total_cost += prd * pc
-            
-            data.append({
-                't': t, 'dem': int(dem), 
-                's_mag': s_mag, 's_ent': s_ent, 's_usi': s_usi,
-                'cmd_mag': int(np.round(cmd_mag)), 
-                'cmd_ent': int(np.round(cmd_ent)), 
-                'cmd_usi': int(np.round(cmd_usi)),
-                'vnt': vnt, 'perd': perd,
-                'svc': 100 * vnt / dem if dem > 0 else 100
-            })
-        
-        df = pd.DataFrame(data)
-        tot_d = demand_np[1:].sum()
-        tot_v = df['vnt'].sum()
-        tot_p = df['perd'].sum()
-        stock_final = df.iloc[-1][['s_mag', 's_ent', 's_usi']].sum()
-        
-        svc = 100 * tot_v / tot_d if tot_d > 0 else 100
-        ventes_perdues_k = tot_p * pv / 1000
-        marge_k = (total_ca - total_cost - stock_final * pc) / 1000
-        ca_k = total_ca / 1000
-        stock_restant_euros = stock_final * pc
-        
-        d_std = demand_np[10:].std()
-        f_std = df.iloc[10:]['cmd_usi'].std()
-        bw = f_std / d_std if d_std > 10 else 1.0
-        
-        max_cmd_usi = df['cmd_usi'].max()
-        limit_respected = max_cmd_usi <= self.MAX_FACTORY_DEMAND
-        
-        valid = (
-            (df[['s_mag', 's_ent', 's_usi']] >= 0).all().all() and
-            (df[['cmd_mag', 'cmd_ent', 'cmd_usi']] >= 0).all().all() and
-            (df['vnt'] <= df['dem']).all() and 
-            0 <= svc <= 100 and 0 < bw < 1000 and 
-            len(df) == self.W + 1 and
-            limit_respected
-        )
-        
-        return {
-            'data': df,
-            'kpis': {
-                'service_level': svc,
-                'ventes_perdues': ventes_perdues_k,
-                'marge': marge_k,
-                'ca': ca_k,
-                'bullwhip': bw,
-                'stock_final': int(stock_final),
-                'stock_restant_euros': stock_restant_euros,
-                'max_cmd_usine': int(max_cmd_usi)
-            },
-            'valid': valid,
-            'params': {
-                'panic': panic, 
-                'lt_usine': lt_usine,
-                'stock_init_mag': stock_init_mag,
-                'stock_init_ent': stock_init_ent,
-                'stock_init_usi': stock_init_usi,
-                'total_lt': lt1 + lt2 + lt3
+            # Enregistrement
+            week_data = {
+                't': t,
+                'dem': dem,
+                's_mag': int(s['mag']),
+                's_ent': int(s['ent']),
+                's_usi': int(s['usi']),
+                's_four': int(s['four']),
+                'cmd_mag': int(cmd['mag']),
+                'cmd_ent': int(cmd['ent']),
+                'cmd_usi': int(cmd['usi']),
+                'cmd_four': int(cmd['four']),
+                'outstanding_mag': int(outstanding['mag']),
+                'outstanding_ent': int(outstanding['ent']),
+                'outstanding_usi': int(outstanding['usi']),
+                'outstanding_four': int(outstanding['four']),
+                'pipe_mag': {k: int(v) for k, v in pipe['mag'].items()},
+                'pipe_ent': {k: int(v) for k, v in pipe['ent'].items()},
+                'pipe_usi': {k: int(v) for k, v in pipe['usi'].items()},
+                'pipe_four': {k: int(v) for k, v in pipe['four'].items()},
+                'fc_mag': int(forecast['mag']),
+                'fc_ent': int(forecast['ent']),
+                'fc_usi': int(forecast['usi']),
+                'fc_four': int(forecast['four']),
+                'target_mag': int(target_level['mag']),
+                'target_ent': int(target_level['ent']),
+                'target_usi': int(target_level['usi']),
+                'target_four': int(target_level['four']),
+                'sales': int(sales),
+                'backlog_mag': int(backlog['mag']),
+                'events': week_log['events'],
+                'lt': lt
             }
-        }
+            
+            all_weeks_data.append(week_data)
+        
+        return all_weeks_data
 
-# SIDEBAR
+
+# ========== INTERFACE ==========
+
 st.sidebar.header("⚙️ Paramètres de Simulation")
 
-# ✅ BIAS SUPPRIMÉ
-panic = st.sidebar.select_slider("Multiplicateur Panique", 
-                                  options=[1, 2, 3], value=2)
-lt_usine = st.sidebar.select_slider("Délai Production (sem)", 
-                                     options=[2, 6, 10], value=6)
+panic = st.sidebar.select_slider("Niveau de Panique", options=[1, 2, 3], value=1)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("📅 Fréquence")
+freq_retail = st.sidebar.selectbox("Magasin & Entrepôt", [1, 2, 4], index=0, format_func=lambda x: f"{x} sem")
+freq_supply = st.sidebar.selectbox("Usine & Fournisseur", [1, 4, 12], index=0, format_func=lambda x: f"{x} sem")
+
+st.sidebar.markdown("---")
+lt_usine = st.sidebar.select_slider("Délai Production Usine (sem)", options=[2, 6, 10], value=2)
+lt_fournisseur = st.sidebar.select_slider("Délai Fournisseur MP (sem)", options=[6, 12, 18, 24], value=6)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📦 Stocks Initiaux")
-stock_init_mag = st.sidebar.slider("Stock Initial Magasin", 100, 1000, 500, 100)
-stock_init_ent = st.sidebar.slider("Stock Initial Entrepôt", 100, 1000, 500, 100)
-stock_init_usi = st.sidebar.slider("Stock Initial Usine", 100, 1000, 500, 100)
+stock_mag = st.sidebar.slider("Stock Initial Magasin", 100, 2000, 500, 100)
+stock_ent = st.sidebar.slider("Stock Initial Entrepôt", 100, 2000, 1100, 100)
+stock_usi = st.sidebar.slider("Stock Initial Usine", 0, 5000, 3200, 200)
+stock_four = st.sidebar.slider("Stock Initial Fournisseur", 0, 5000, 5000, 200)
 
-st.sidebar.markdown("---")
-pv = st.sidebar.slider("Prix Vente (€)", 50, 250, 125, 5)
-pc = st.sidebar.slider("Coût Production (€)", 10, 150, 30, 5)
-
-st.sidebar.info(f"🏭 **Limite usine: 1000 pièces/semaine**")
-
-if st.sidebar.button("▶ LANCER SIMULATION (24 semaines)", type="primary"):
+if st.sidebar.button("▶ LANCER SIMULATION", type="primary"):
     sim = BullwhipSimulator()
-    result = sim.simulate(panic, lt_usine, stock_init_mag, stock_init_ent, stock_init_usi, pv, pc)
-    st.session_state['result'] = result
+    all_data = sim.simulate_full(panic, lt_usine, lt_fournisseur, freq_retail, freq_supply,
+                                  stock_mag, stock_ent, stock_usi, stock_four)
+    st.session_state['simulation_data'] = all_data
+    st.session_state['current_week'] = 0
 
-# ✅ TESTS COMPLETS : 3×3×3×3×3 = 243 combinaisons (sans Bias)
-if st.sidebar.button("🔬 LANCER TESTS COMPLETS (243 combinaisons)", type="secondary"):
-    with st.spinner('Tests en cours... (243 combinaisons)'):
-        sim = BullwhipSimulator()
-        results = []
-        progress = st.progress(0)
-        count = 0
-        total = 3 * 3 * 3 * 3 * 3  # 243
-        
-        for p in [1, 2, 3]:
-            for lt in [2, 6, 10]:
-                for s_mag in [100, 500, 1000]:
-                    for s_ent in [100, 500, 1000]:
-                        for s_usi in [100, 500, 1000]:
-                            r = sim.simulate(p, lt, s_mag, s_ent, s_usi, pv, pc)
-                            if r['valid']:
-                                results.append({
-                                    'Panic': r['params']['panic'],
-                                    'LT Usine': r['params']['lt_usine'],
-                                    'Stock Magasin': r['params']['stock_init_mag'],
-                                    'Stock Entrepôt': r['params']['stock_init_ent'],
-                                    'Stock Usine': r['params']['stock_init_usi'],
-                                    'CA (K€)': round(r['kpis']['ca'], 1),
-                                    'Marge Réelle (K€)': round(r['kpis']['marge'], 1),
-                                    'Ventes Perdues (K€)': round(r['kpis']['ventes_perdues'], 1),
-                                    'Stock Restant (€)': int(r['kpis']['stock_restant_euros']),
-                                    'Bullwhip': round(r['kpis']['bullwhip'], 2),
-                                    'Service (%)': round(r['kpis']['service_level'], 1)
-                                })
-                            count += 1
-                            progress.progress(count / total)
-        
-        st.session_state['test_results'] = pd.DataFrame(results)
-        progress.empty()
-        st.success(f"✅ {len(results)}/{total} tests valides!")
 
-# AFFICHAGE SIMULATION
-if 'result' in st.session_state and st.session_state['result'] is not None:
-    r = st.session_state['result']
+# ========== VISUALISATION ==========
+
+if 'simulation_data' in st.session_state:
+    data = st.session_state['simulation_data']
+    max_week = len(data) - 1
     
-    if not r['data'].empty:
-        df, kpis = r['data'], r['kpis']
-        
-        st.markdown("---")
-        st.subheader("📊 Résultats de la Simulation Actuelle")
-        
-        col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
-        col1.metric("SERVICE LEVEL", f"{kpis['service_level']:.1f}%")
-        col2.metric("VENTES PERDUES", f"${kpis['ventes_perdues']:.1f}K")
-        col3.metric("MARGE RÉELLE", f"${kpis['marge']:.1f}K")
-        col4.metric("BULLWHIP RATIO", f"{kpis['bullwhip']:.2f}x")
-        col5.metric("STOCK FINAL", f"{kpis['stock_final']:,}")
-        col6.metric("LT TOTAL", f"{r['params']['total_lt']} sem")
-        col7.metric("MAX CMD USINE", f"{kpis['max_cmd_usine']}", 
-                   delta="✅ OK" if kpis['max_cmd_usine'] <= 1000 else "⚠️ LIMITE",
-                   delta_color="normal" if kpis['max_cmd_usine'] <= 1000 else "inverse")
-        
-        col_ca1, col_ca2, col_ca3 = st.columns(3)
-        col_ca1.metric("💰 CHIFFRE D'AFFAIRES", f"${kpis['ca']:.1f}K")
-        col_ca2.metric("📦 STOCK RESTANT (€)", f"{kpis['stock_restant_euros']:,.0f} €")
-        col_ca3.metric("📊 TAUX DE MARGE", f"{(kpis['marge']/kpis['ca']*100) if kpis['ca'] > 0 else 0:.1f}%")
-        
-        fig1 = go.Figure()
-        fig1.add_trace(go.Scatter(x=df['t'], y=df['dem'], mode='lines', 
-                                  name='Demande Réelle', line=dict(color='black', width=3)))
-        fig1.add_trace(go.Scatter(x=df['t'], y=df['cmd_mag'], mode='lines', 
-                                  name='Commandes Magasin', line=dict(color='#007bff', width=2)))
-        fig1.add_trace(go.Scatter(x=df['t'], y=df['cmd_ent'], mode='lines', 
-                                  name='Commandes Entrepôt', line=dict(color='#ffc107', width=2)))
-        fig1.add_trace(go.Scatter(x=df['t'], y=df['cmd_usi'], mode='lines', 
-                                  name='Commandes Usine', line=dict(color='#dc3545', width=2)))
-        
-        fig1.add_hline(y=1000, line_dash="dash", line_color="red", 
-                      annotation_text="Limite Usine (1000)", 
-                      annotation_position="right")
-        
-        fig1.update_layout(title="📈 Amplification de la Demande (Effet Bullwhip)",
-                          xaxis_title="Semaine", yaxis_title="Quantité", height=450)
-        st.plotly_chart(fig1, use_container_width=True)
-        
-        col_g1, col_g2 = st.columns(2)
-        
-        with col_g1:
-            fig2 = go.Figure()
-            fig2.add_trace(go.Scatter(x=df['t'], y=df['s_mag'], mode='lines', 
-                                      name='Magasin', fill='tozeroy', line=dict(color='#007bff')))
-            fig2.add_trace(go.Scatter(x=df['t'], y=df['s_ent'], mode='lines', 
-                                      name='Entrepôt', fill='tozeroy', line=dict(color='#ffc107')))
-            fig2.add_trace(go.Scatter(x=df['t'], y=df['s_usi'], mode='lines', 
-                                      name='Usine', fill='tozeroy', line=dict(color='#28a745')))
-            fig2.update_layout(title="📦 Niveaux de Stock", 
-                              xaxis_title="Semaine", yaxis_title="Stock", height=400)
-            st.plotly_chart(fig2, use_container_width=True)
-        
-        with col_g2:
-            fig3 = go.Figure()
-            fig3.add_trace(go.Scatter(x=df['t'], y=df['svc'], mode='lines', 
-                                      name='Service %', fill='tozeroy', line=dict(color='#28a745')))
-            fig3.update_layout(title="✅ Taux de Service", 
-                              xaxis_title="Semaine", yaxis_title="Service (%)", 
-                              yaxis_range=[0, 100], height=400)
-            st.plotly_chart(fig3, use_container_width=True)
-        
-        st.markdown("---")
-        st.subheader("🔬 Validation des Calculs")
-        if r['valid']:
-            st.success(f"✅ Simulation valide - Bullwhip: {kpis['bullwhip']:.2f}x | Service: {kpis['service_level']:.1f}% | CA: ${kpis['ca']:.1f}K")
+    st.markdown("---")
+    st.subheader("🎬 Mode Pas-à-Pas - Navigation")
+    
+    col_nav1, col_nav2, col_nav3, col_nav4, col_nav5 = st.columns([1, 1, 3, 1, 1])
+    
+    with col_nav1:
+        if st.button("⏮ Début", use_container_width=True):
+            st.session_state['current_week'] = 0
+            st.rerun()
+    
+    with col_nav2:
+        if st.button("◀ Précédent", use_container_width=True):
+            if st.session_state['current_week'] > 0:
+                st.session_state['current_week'] -= 1
+                st.rerun()
+    
+    with col_nav3:
+        current_week = st.slider("Semaine", 0, max_week, st.session_state.get('current_week', 0), key='week_slider_main')
+        st.session_state['current_week'] = current_week
+    
+    with col_nav4:
+        if st.button("Suivant ▶", use_container_width=True):
+            if st.session_state['current_week'] < max_week:
+                st.session_state['current_week'] += 1
+                st.rerun()
+    
+    with col_nav5:
+        if st.button("Fin ⏭", use_container_width=True):
+            st.session_state['current_week'] = max_week
+            st.rerun()
+    
+    week = data[current_week]
+    lt = week['lt']
+    
+    st.markdown(f"## 📅 Semaine {current_week}")
+    
+    # ========== VISUALISATION SUPPLY CHAIN HORIZONTALE ==========
+    
+    st.markdown("### 🔄 Vue Supply Chain")
+    
+    # FLUX COMMANDES (EN HAUT - vers l'amont ←)
+    st.markdown("#### ← ← ← FLUX INFORMATION (Commandes)")
+    
+    col_cmd1, col_cmd2, col_cmd3, col_cmd4 = st.columns(4)
+    
+    with col_cmd4:  # MAGASIN à droite
+        if week['cmd_mag'] > 0:
+            st.markdown(f"""
+            <div style='background:#667eea; padding:10px; border-radius:5px; text-align:center; color:white;'>
+                📝 Cmd: <strong>{week['cmd_mag']}</strong> pcs
+            </div>
+            """, unsafe_allow_html=True)
         else:
-            st.error("❌ Problèmes détectés")
-
-# AFFICHAGE TESTS
-if 'test_results' in st.session_state and st.session_state['test_results'] is not None:
-    df_test = st.session_state['test_results']
+            st.markdown("<div style='padding:10px; text-align:center; color:#ccc;'>—</div>", unsafe_allow_html=True)
     
-    if not df_test.empty:
-        st.markdown("---")
-        st.subheader(f"🧪 Résultats des Tests Complets ({len(df_test)} combinaisons)")
+    with col_cmd3:  # ENTREPÔT
+        if week['cmd_ent'] > 0:
+            st.markdown(f"""
+            <div style='background:#f093fb; padding:10px; border-radius:5px; text-align:center; color:white;'>
+                📝 Cmd: <strong>{week['cmd_ent']}</strong> pcs
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("<div style='padding:10px; text-align:center; color:#ccc;'>—</div>", unsafe_allow_html=True)
+    
+    with col_cmd2:  # USINE
+        if week['cmd_usi'] > 0:
+            st.markdown(f"""
+            <div style='background:#4facfe; padding:10px; border-radius:5px; text-align:center; color:white;'>
+                📝 Cmd: <strong>{week['cmd_usi']}</strong> pcs
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("<div style='padding:10px; text-align:center; color:#ccc;'>—</div>", unsafe_allow_html=True)
+    
+    with col_cmd1:  # FOURNISSEUR à gauche
+        if week['cmd_four'] > 0:
+            st.markdown(f"""
+            <div style='background:#43e97b; padding:10px; border-radius:5px; text-align:center; color:white;'>
+                🏭 Prod: <strong>{week['cmd_four']}</strong> pcs
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("<div style='padding:10px; text-align:center; color:#ccc;'>—</div>", unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # LES 4 ÉTAGES (AMONT → AVAL = Gauche → Droite)
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown(f"""
+        <div style='background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); 
+                    padding: 20px; border-radius: 10px; color: white;'>
+            <h3 style='margin:0; text-align:center;'>🚚 FOURNISSEUR</h3>
+            <hr style='border-color: white;'>
+            <p><strong>Stock:</strong> {week['s_four']} pcs</p>
+            <p><strong>Outstanding:</strong> {week['outstanding_four']} pcs</p>
+            <p><strong>Forecast:</strong> {week['fc_four']} pcs</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+        <div style='background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); 
+                    padding: 20px; border-radius: 10px; color: white;'>
+            <h3 style='margin:0; text-align:center;'>🏗️ USINE</h3>
+            <hr style='border-color: white;'>
+            <p><strong>Stock:</strong> {week['s_usi']} pcs</p>
+            <p><strong>Outstanding:</strong> {week['outstanding_usi']} pcs</p>
+            <p><strong>Forecast:</strong> {week['fc_usi']} pcs</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(f"""
+        <div style='background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); 
+                    padding: 20px; border-radius: 10px; color: white;'>
+            <h3 style='margin:0; text-align:center;'>🏭 ENTREPÔT</h3>
+            <hr style='border-color: white;'>
+            <p><strong>Stock:</strong> {week['s_ent']} pcs</p>
+            <p><strong>Outstanding:</strong> {week['outstanding_ent']} pcs</p>
+            <p><strong>Forecast:</strong> {week['fc_ent']} pcs</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col4:
+        st.markdown(f"""
+        <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                    padding: 20px; border-radius: 10px; color: white;'>
+            <h3 style='margin:0; text-align:center;'>🏪 MAGASIN</h3>
+            <hr style='border-color: white;'>
+            <p><strong>Stock:</strong> {week['s_mag']} pcs</p>
+            <p><strong>Demande:</strong> {week['dem']} pcs</p>
+            <p><strong>Ventes:</strong> {week['sales']} pcs</p>
+            <p><strong>Outstanding:</strong> {week['outstanding_mag']} pcs</p>
+            <p><strong>Forecast:</strong> {week['fc_mag']} pcs</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # FLUX PRODUITS (EN BAS - vers l'aval →)
+    st.markdown("#### → → → FLUX PRODUITS (Livraisons)")
+    
+    # FOURNISSEUR → USINE
+    st.markdown(f"**FOURNISSEUR → USINE** (LT = {lt['usi']} sem)")
+    pipe_four = week['pipe_four']
+    if pipe_four:
+        sorted_items = sorted(pipe_four.items())[:lt['usi']]
+        if sorted_items:
+            cols = st.columns(max(len(sorted_items), 1))
+            for idx, (arrival_week, qty) in enumerate(sorted_items):
+                with cols[idx]:
+                    st.markdown(f"""
+                    <div style='background:#43e97b; padding:8px; border-radius:5px; text-align:center; margin:2px;'>
+                        <small>Sem {arrival_week}</small><br><strong>{qty}</strong>
+                    </div>
+                    """, unsafe_allow_html=True)
+    else:
+        st.info("Aucun transit")
+    
+    # USINE → ENTREPÔT
+    st.markdown(f"**USINE → ENTREPÔT** (LT = {lt['ent']} sem)")
+    pipe_usi = week['pipe_usi']
+    if pipe_usi:
+        sorted_items = sorted(pipe_usi.items())[:lt['ent']]
+        if sorted_items:
+            cols = st.columns(max(len(sorted_items), 1))
+            for idx, (arrival_week, qty) in enumerate(sorted_items):
+                with cols[idx]:
+                    st.markdown(f"""
+                    <div style='background:#4facfe; padding:8px; border-radius:5px; text-align:center; margin:2px;'>
+                        <small>Sem {arrival_week}</small><br><strong>{qty}</strong>
+                    </div>
+                    """, unsafe_allow_html=True)
+    else:
+        st.info("Aucun transit")
+    
+    # ENTREPÔT → MAGASIN
+    st.markdown(f"**ENTREPÔT → MAGASIN** (LT = {lt['mag']} sem)")
+    pipe_ent = week['pipe_ent']
+    if pipe_ent:
+        sorted_items = sorted(pipe_ent.items())[:lt['mag']]
+        if sorted_items:
+            cols = st.columns(max(len(sorted_items), 1))
+            for idx, (arrival_week, qty) in enumerate(sorted_items):
+                with cols[idx]:
+                    st.markdown(f"""
+                    <div style='background:#f093fb; padding:8px; border-radius:5px; text-align:center; margin:2px;'>
+                        <small>Sem {arrival_week}</small><br><strong>{qty}</strong>
+                    </div>
+                    """, unsafe_allow_html=True)
+    else:
+        st.info("Aucun transit")
+    
+    # ========== LOG DES ÉVÉNEMENTS ==========
+    
+    st.markdown("---")
+    st.subheader(f"📋 Événements de la Semaine {current_week}")
+    
+    if week['events']:
+        for event in week['events']:
+            st.markdown(f"- {event}")
+    else:
+        st.info("Aucun événement cette semaine")
+    # ========== GRAPHIQUES AGRÉGÉS ==========
+    
+    st.markdown("---")
+    st.subheader("📊 Analyse Globale de la Simulation")
+    
+    # Préparer les données agrégées
+    all_weeks = []
+    for w in data:
+        all_weeks.append({
+            't': w['t'],
+            'dem': w['dem'],
+            's_mag': w['s_mag'],
+            's_ent': w['s_ent'],
+            's_usi': w['s_usi'],
+            's_four': w['s_four'],
+            'cmd_mag': w['cmd_mag'],
+            'cmd_ent': w['cmd_ent'],
+            'cmd_usi': w['cmd_usi'],
+            'cmd_four': w['cmd_four'],
+            'sales': w['sales']
+        })
+    
+    df_analysis = pd.DataFrame(all_weeks)
+    
+    # Calcul Service Level par semaine
+    df_analysis['service_level'] = df_analysis.apply(
+        lambda row: 100 * row['sales'] / row['dem'] if row['dem'] > 0 else 100,
+        axis=1
+    )
+    
+    # ========== KPIs FINANCIERS ==========
+    
+    pv = 200  # Prix vente
+    pc = 30   # Coût production
+    
+    total_sales = df_analysis['sales'].sum()
+    total_demand = df_analysis['dem'].sum()
+    total_lost = total_demand - total_sales
+    
+    ca_total = total_sales * pv / 1000  # en K€
+    cout_production = total_sales * pc / 1000  # en K€
+    
+    stock_final_total = df_analysis.iloc[-1][['s_mag', 's_ent', 's_usi', 's_four']].sum()
+    cout_stock_final = stock_final_total * pc / 1000  # en K€
+    
+    marge_absolue = ca_total - cout_production - cout_stock_final  # en K€
+    marge_pct = (marge_absolue / ca_total * 100) if ca_total > 0 else 0
+    
+    service_global = (total_sales / total_demand * 100) if total_demand > 0 else 0
+    
+    # Affichage KPIs
+    st.markdown("### 💰 Indicateurs Financiers")
+    
+    col_kpi1, col_kpi2, col_kpi3, col_kpi4, col_kpi5 = st.columns(5)
+    
+    with col_kpi1:
+        st.metric("CA Total", f"{ca_total:.1f} K€")
+    
+    with col_kpi2:
+        st.metric("Coût Production", f"{cout_production:.1f} K€")
+    
+    with col_kpi3:
+        st.metric("Marge Absolue", f"{marge_absolue:.1f} K€")
+    
+    with col_kpi4:
+        st.metric("Marge %", f"{marge_pct:.1f}%")
+    
+    with col_kpi5:
+        st.metric("Service Level Global", f"{service_global:.1f}%")
+    
+    st.markdown("---")
+    
+    # ========== GRAPHIQUES ==========
+    
+    # Graphique 1: Taux de Service Client
+    col_g1, col_g2 = st.columns(2)
+    
+    with col_g1:
+        fig_service = go.Figure()
+        fig_service.add_trace(go.Scatter(
+            x=df_analysis['t'],
+            y=df_analysis['service_level'],
+            mode='lines+markers',
+            name='Service Level',
+            fill='tozeroy',
+            line=dict(color='#28a745', width=2),
+            marker=dict(size=4)
+        ))
         
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("CA Moyen", f"${df_test['CA (K€)'].mean():.1f}K")
-        col2.metric("Marge Moyenne", f"${df_test['Marge Réelle (K€)'].mean():.1f}K")
-        col3.metric("Bullwhip Moyen", f"{df_test['Bullwhip'].mean():.2f}x")
-        col4.metric("Service Moyen", f"{df_test['Service (%)'].mean():.1f}%")
+        fig_service.add_hline(y=95, line_dash="dash", line_color="orange", 
+                             annotation_text="Cible 95%")
+        fig_service.add_hline(y=100, line_dash="dot", line_color="green")
         
-        st.markdown("### 📋 Tableau des Résultats (triable par colonne)")
-        
-        st.dataframe(
-            df_test,
-            use_container_width=True,
+        fig_service.update_layout(
+            title="📈 Taux de Service Client (par semaine)",
+            xaxis_title="Semaine",
+            yaxis_title="Service Level (%)",
+            yaxis_range=[0, 105],
             height=400
         )
+        st.plotly_chart(fig_service, use_container_width=True, key='fig_service_global')
+    
+    # Graphique 2: Commandes par Étage
+    with col_g2:
+        fig_orders = go.Figure()
         
-        st.markdown("### 📥 Télécharger les Résultats")
+        fig_orders.add_trace(go.Scatter(
+            x=df_analysis['t'],
+            y=df_analysis['cmd_mag'],
+            mode='lines+markers',
+            name='Magasin',
+            line=dict(color='#667eea', width=2),
+            marker=dict(size=4)
+        ))
         
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_test.to_excel(writer, index=False, sheet_name='Résultats')
+        fig_orders.add_trace(go.Scatter(
+            x=df_analysis['t'],
+            y=df_analysis['cmd_ent'],
+            mode='lines+markers',
+            name='Entrepôt',
+            line=dict(color='#f093fb', width=2),
+            marker=dict(size=4)
+        ))
         
-        excel_data = output.getvalue()
+        fig_orders.add_trace(go.Scatter(
+            x=df_analysis['t'],
+            y=df_analysis['cmd_usi'],
+            mode='lines+markers',
+            name='Usine',
+            line=dict(color='#4facfe', width=2),
+            marker=dict(size=4)
+        ))
         
-        st.download_button(
-            label="📊 Télécharger en Excel",
-            data=excel_data,
-            file_name="bullwhip_simulation_results_243.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        fig_orders.add_trace(go.Scatter(
+            x=df_analysis['t'],
+            y=df_analysis['cmd_four'],
+            mode='lines+markers',
+            name='Fournisseur',
+            line=dict(color='#43e97b', width=2),
+            marker=dict(size=4)
+        ))
+        
+        fig_orders.update_layout(
+            title="📦 Commandes par Étage",
+            xaxis_title="Semaine",
+            yaxis_title="Quantité",
+            height=400
         )
-        
-        col_top, col_bottom = st.columns(2)
-        
-        with col_top:
-            st.markdown("### 🏆 Top 10 Meilleure Marge")
-            top10 = df_test.nlargest(10, 'Marge Réelle (K€)')[['Panic', 'LT Usine', 'Stock Magasin', 'Stock Entrepôt', 'Stock Usine', 'Marge Réelle (K€)', 'CA (K€)']]
-            st.dataframe(top10, use_container_width=True)
-        
-        with col_bottom:
-            st.markdown("### ⚠️ Top 10 Pire Marge")
-            bottom10 = df_test.nsmallest(10, 'Marge Réelle (K€)')[['Panic', 'LT Usine', 'Stock Magasin', 'Stock Entrepôt', 'Stock Usine', 'Marge Réelle (K€)', 'Ventes Perdues (K€)']]
-            st.dataframe(bottom10, use_container_width=True)
+        st.plotly_chart(fig_orders, use_container_width=True, key='fig_orders_global')
+    
+    # Graphique 3: Stocks par Étage
+    st.markdown("### 📊 Évolution des Stocks par Étage")
+    
+    fig_stocks = go.Figure()
+    
+    fig_stocks.add_trace(go.Scatter(
+        x=df_analysis['t'],
+        y=df_analysis['s_mag'],
+        mode='lines',
+        name='Magasin',
+        fill='tonexty',
+        line=dict(color='#667eea', width=2)
+    ))
+    
+    fig_stocks.add_trace(go.Scatter(
+        x=df_analysis['t'],
+        y=df_analysis['s_ent'],
+        mode='lines',
+        name='Entrepôt',
+        fill='tonexty',
+        line=dict(color='#f093fb', width=2)
+    ))
+    
+    fig_stocks.add_trace(go.Scatter(
+        x=df_analysis['t'],
+        y=df_analysis['s_usi'],
+        mode='lines',
+        name='Usine',
+        fill='tonexty',
+        line=dict(color='#4facfe', width=2)
+    ))
+    
+    fig_stocks.add_trace(go.Scatter(
+        x=df_analysis['t'],
+        y=df_analysis['s_four'],
+        mode='lines',
+        name='Fournisseur',
+        fill='tonexty',
+        line=dict(color='#43e97b', width=2)
+    ))
+    
+    fig_stocks.update_layout(
+        title="Niveaux de Stock - Tous Étages",
+        xaxis_title="Semaine",
+        yaxis_title="Stock (unités)",
+        height=450
+    )
+    st.plotly_chart(fig_stocks, use_container_width=True, key='fig_stocks_global')
+    
+    # ========== TABLEAU RÉCAPITULATIF ==========
+    
+    st.markdown("---")
+    st.markdown("### 📋 Résumé de la Simulation")
+    
+    summary_data = {
+        'Indicateur': [
+            'Demande Totale',
+            'Ventes Totales',
+            'Ventes Perdues',
+            'Service Level Global',
+            'CA Total',
+            'Coût Production',
+            'Stock Final (unités)',
+            'Coût Stock Final',
+            'Marge Absolue',
+            'Marge %'
+        ],
+        'Valeur': [
+            f"{int(total_demand):,} pcs",
+            f"{int(total_sales):,} pcs",
+            f"{int(total_lost):,} pcs",
+            f"{service_global:.1f}%",
+            f"{ca_total:.1f} K€",
+            f"{cout_production:.1f} K€",
+            f"{int(stock_final_total):,} pcs",
+            f"{cout_stock_final:.1f} K€",
+            f"{marge_absolue:.1f} K€",
+            f"{marge_pct:.1f}%"
+        ]
+    }
+    
+    df_summary = pd.DataFrame(summary_data)
+    
+    st.dataframe(
+        df_summary.style.set_properties(**{
+            'background-color': '#f0f2f6',
+            'color': '#262730',
+            'border-color': 'white'
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+else:
+    st.info("👈 Configurez les paramètres et cliquez sur 'LANCER SIMULATION' pour commencer")
+
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: #666; padding: 20px;'>
+    <p><strong>Simulateur Bullwhip - Mode Pas-à-Pas v2.0</strong></p>
+    <p>✅ Weighted Moving Average | ✅ Supply Chain Horizontale | ✅ Flux Visibles | ✅ KPIs Financiers</p>
+</div>
+""", unsafe_allow_html=True)
+
+
+

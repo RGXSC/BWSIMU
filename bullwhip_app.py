@@ -2,6 +2,13 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
+from itertools import product
+from sklearn.linear_model import LinearRegression
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.preprocessing import StandardScaler
+import time
+from io import BytesIO
 
 st.set_page_config(page_title="Simulateur Bullwhip - Mode Pas-à-Pas", layout="wide")
 
@@ -14,23 +21,39 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 class BullwhipSimulator:
-    def __init__(self):
+    def __init__(self, spikiness=1, spike_duration=9):
         self.W = 52
-        self.MAX_WEEKLY_CAPACITY = 5000
         
-        # Demande simplifiée
+        # Calculer le pic de demande selon spikiness
+        if spikiness == 1:
+            spike_value = 500
+        elif spikiness == 2:
+            spike_value = 1000
+        elif spikiness == 3:
+            spike_value = 1500
+        else:  # spikiness == 4
+            spike_value = 2000
+        
+        # Capacité max fournisseur = 4x le pic de demande
+        self.MAX_WEEKLY_CAPACITY = spike_value * 4
+        
+        # Demande avec spikiness paramétrable
         self.DEMAND_BASE = [0]
         for i in range(3):
             self.DEMAND_BASE.append(100)
-        for i in range(4):
-            self.DEMAND_BASE.append(500)
-        for i in range(2):
-            self.DEMAND_BASE.append(100)
+        
+        # Pic de demande avec durée paramétrable
+        for i in range(spike_duration):
+            self.DEMAND_BASE.append(spike_value)
+        
+        # Reste des semaines : demande normale
         while len(self.DEMAND_BASE) <= self.W:
             self.DEMAND_BASE.append(100)
         
         self.DEMAND_BASE = np.array(self.DEMAND_BASE, dtype=float)
         self.MAX_DEMAND = np.max(self.DEMAND_BASE)
+
+ 
     
     def simulate_full(self, panic, lt_usine, lt_fournisseur, 
                       freq_retail, freq_supply,
@@ -312,6 +335,21 @@ class BullwhipSimulator:
 
 st.sidebar.header("⚙️ Paramètres de Simulation")
 
+# PARAMÈTRES FINANCIERS
+st.sidebar.markdown("---")
+st.sidebar.subheader("💰 Paramètres Financiers")
+prix_vente = st.sidebar.select_slider("Prix de Vente (€)", options=list(range(50, 210, 10)), value=200)
+cout_produit = st.sidebar.select_slider("Coût Produit (€)", options=list(range(10, 60, 10)), value=30)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("📊 Demande Client")
+spikiness = st.sidebar.slider("Intensité du Pic de Demande", 1, 4, 1, 
+                               help="1=500, 2=1000, 3=1500, 4=2000")
+spike_duration = st.sidebar.slider("Durée du Pic (semaines)", 1, 20, 9,
+                                    help="Nombre de semaines avec demande élevée")
+
+
+st.sidebar.markdown("---")
 panic = st.sidebar.select_slider("Niveau de Panique", options=[1, 2, 3], value=1)
 
 st.sidebar.markdown("---")
@@ -331,11 +369,369 @@ stock_usi = st.sidebar.slider("Stock Initial Usine", 0, 5000, 3200, 200)
 stock_four = st.sidebar.slider("Stock Initial Fournisseur", 0, 5000, 5000, 200)
 
 if st.sidebar.button("▶ LANCER SIMULATION", type="primary"):
-    sim = BullwhipSimulator()
+    sim = BullwhipSimulator(spikiness=spikiness, spike_duration=spike_duration)
     all_data = sim.simulate_full(panic, lt_usine, lt_fournisseur, freq_retail, freq_supply,
-                                  stock_mag, stock_ent, stock_usi, stock_four)
+                                  stock_mag, stock_ent, stock_usi, stock_four, 
+                                  pv=prix_vente, pc=cout_produit)
     st.session_state['simulation_data'] = all_data
     st.session_state['current_week'] = 0
+    st.session_state['pv'] = prix_vente
+    st.session_state['pc'] = cout_produit
+    st.session_state['spikiness'] = spikiness
+    st.session_state['spike_duration'] = spike_duration 
+
+# ========== ANALYSE COMBINATOIRE OPTIMISÉE ==========
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔬 Analyse Combinatoire Complète")
+
+# Options avancées
+with st.sidebar.expander("⚙️ Options avancées"):
+    test_all_combinations = st.checkbox("Tester TOUTES les combinaisons possibles", value=False)
+    nb_simulations = st.number_input(
+        "Nombre de simulations aléatoires", 
+        min_value=1000, 
+        max_value=100000,
+        value=10000, 
+        step=1000,
+        disabled=test_all_combinations,
+        help="Nombre de combinaisons aléatoires à tester"
+    )
+    
+    # Pas de variation pour accélérer
+    stock_step = st.select_slider("Pas de variation stocks", options=[200, 400, 500, 600, 1000], value=500)
+    
+    # Tester spike duration et hauteur
+    test_spike_params = st.checkbox("Varier intensité et durée du spike", value=True)
+
+if st.sidebar.button("🚀 LANCER ANALYSE COMPLÈTE", type="secondary"):
+    
+    with st.spinner("⏳ Analyse en cours..."):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Paramètres à tester
+        panics = [1, 2, 3]
+        lt_usines = [2, 6, 10]
+        lt_fournisseurs = [6, 12, 18, 24]
+        freq_retails = [1, 2, 4]
+        freq_supplies = [1, 4, 12]
+        stocks_mag = list(range(200, 2200, stock_step))
+        stocks_ent = list(range(200, 2200, stock_step))
+        stocks_usi = list(range(0, 5200, stock_step))
+        stocks_four = list(range(0, 5200, stock_step))
+        
+        # Spike parameters
+        if test_spike_params:
+            spikiness_levels = [1, 2, 3, 4]
+            spike_duration_levels = [4, 6, 9, 12, 15]
+        else:
+            spikiness_levels = [spikiness]
+            spike_duration_levels = [spike_duration]
+        
+        # Calculer nombre total
+        total_possible = (len(panics) * len(lt_usines) * len(lt_fournisseurs) * 
+                         len(freq_retails) * len(freq_supplies) * len(stocks_mag) * 
+                         len(stocks_ent) * len(stocks_usi) * len(stocks_four) *
+                         len(spikiness_levels) * len(spike_duration_levels))
+        
+        if test_all_combinations:
+            nb_to_test = total_possible
+            status_text.info(f"📊 Test de TOUTES les {total_possible:,} combinaisons possibles")
+        else:
+            nb_to_test = min(nb_simulations, total_possible)
+            status_text.info(f"📊 Test de {nb_to_test:,} combinaisons sur {total_possible:,} possibles")
+        
+        results = []
+        np.random.seed(42)
+        
+        import time as time_module
+        start_time = time_module.time()
+        
+        # Génération optimisée
+        if test_all_combinations:
+            # TOUTES les combinaisons
+            from itertools import product as iter_product
+            all_params = iter_product(
+                panics, lt_usines, lt_fournisseurs, freq_retails, freq_supplies,
+                stocks_mag, stocks_ent, stocks_usi, stocks_four,
+                spikiness_levels, spike_duration_levels
+            )
+            params_list = list(all_params)
+        else:
+            # Échantillonnage aléatoire
+            params_list = []
+            for _ in range(nb_to_test):
+                params_list.append((
+                    np.random.choice(panics),
+                    np.random.choice(lt_usines),
+                    np.random.choice(lt_fournisseurs),
+                    np.random.choice(freq_retails),
+                    np.random.choice(freq_supplies),
+                    np.random.choice(stocks_mag),
+                    np.random.choice(stocks_ent),
+                    np.random.choice(stocks_usi),
+                    np.random.choice(stocks_four),
+                    np.random.choice(spikiness_levels),
+                    np.random.choice(spike_duration_levels)
+                ))
+        
+        # Simulation en batch
+        for idx, (p, lt_u, lt_f, fr_ret, fr_sup, s_m, s_e, s_u, s_f, spk, spike_dur) in enumerate(params_list):
+            
+            try:
+                sim = BullwhipSimulator(spikiness=spk, spike_duration=spike_dur)
+                data = sim.simulate_full(p, lt_u, lt_f, fr_ret, fr_sup, s_m, s_e, s_u, s_f, prix_vente, cout_produit)
+                
+                # Calcul rapide des métriques
+                total_sales = sum(w['sales'] for w in data)
+                total_demand = sum(w['dem'] for w in data)
+                ca_total = total_sales * prix_vente / 1000
+                cout_production = total_sales * cout_produit / 1000
+                stock_final = data[-1]['s_mag'] + data[-1]['s_ent'] + data[-1]['s_usi'] + data[-1]['s_four']
+                cout_stock_final = stock_final * cout_produit / 1000
+                marge_absolue = ca_total - cout_production - cout_stock_final
+                service_level = (total_sales / total_demand * 100) if total_demand > 0 else 0
+                
+                results.append({
+                    'panic': p,
+                    'lt_usine': lt_u,
+                    'lt_fournisseur': lt_f,
+                    'freq_retail': fr_ret,
+                    'freq_supply': fr_sup,
+                    'stock_mag': s_m,
+                    'stock_ent': s_e,
+                    'stock_usi': s_u,
+                    'stock_four': s_f,
+                    'spikiness': spk,
+                    'spike_duration': spike_dur,
+                    'marge_nette': marge_absolue,
+                    'service_level': service_level,
+                    'ca_total': ca_total,
+                    'ventes_totales': total_sales,
+                    'demande_totale': total_demand
+                })
+                
+                del sim, data
+                
+            except:
+                pass
+            
+            # Mise à jour tous les 100
+            if idx % 100 == 0 and idx > 0:
+                progress_bar.progress(idx / nb_to_test)
+                elapsed = time_module.time() - start_time
+                speed = idx / elapsed
+                remaining = (nb_to_test - idx) / speed if speed > 0 else 0
+                status_text.text(f"⏳ {idx:,}/{nb_to_test:,} | {speed:.0f} sim/s | Restant: ~{remaining/60:.1f}min")
+        
+        progress_bar.progress(1.0)
+        elapsed_total = time_module.time() - start_time
+        
+        df_results = pd.DataFrame(results)
+        st.session_state['combinatorial_results'] = df_results
+        
+        # ===== RÉGRESSION TREE (Plus rapide et performant) =====
+        
+        X = df_results[['panic', 'lt_usine', 'lt_fournisseur', 'freq_retail', 'freq_supply',
+                        'stock_mag', 'stock_ent', 'stock_usi', 'stock_four', 
+                        'spikiness', 'spike_duration']]
+        y = df_results['marge_nette']
+        
+        # Decision Tree (pas besoin de normalisation)
+        from sklearn.tree import DecisionTreeRegressor
+        model_tree = DecisionTreeRegressor(max_depth=15, min_samples_split=20, random_state=42)
+        model_tree.fit(X, y)
+        
+        feature_importance = pd.DataFrame({
+            'Paramètre': X.columns,
+            'Importance': model_tree.feature_importances_
+        }).sort_values('Importance', ascending=False)
+        
+        # Random Forest pour comparaison
+        from sklearn.ensemble import RandomForestRegressor
+        model_rf = RandomForestRegressor(n_estimators=100, max_depth=15, random_state=42, n_jobs=-1)
+        model_rf.fit(X, y)
+        
+        feature_importance_rf = pd.DataFrame({
+            'Paramètre': X.columns,
+            'Importance': model_rf.feature_importances_
+        }).sort_values('Importance', ascending=False)
+        
+        st.session_state['feature_importance_tree'] = feature_importance
+        st.session_state['regression_score_tree'] = model_tree.score(X, y)
+        st.session_state['feature_importance_rf'] = feature_importance_rf
+        st.session_state['regression_score_rf'] = model_rf.score(X, y)
+        
+        st.success(f"✅ Analyse terminée ! {len(df_results):,} simulations en {elapsed_total/60:.1f} min | Vitesse: {len(df_results)/elapsed_total:.0f} sim/s")
+
+
+
+
+# ========== AFFICHAGE RÉSULTATS ==========
+
+if 'combinatorial_results' in st.session_state:
+    st.markdown("---")
+    st.markdown("## 🔬 Résultats de l'Analyse Combinatoire Complète")
+    
+    df_comb = st.session_state['combinatorial_results']
+    feat_tree = st.session_state.get('feature_importance_tree')
+    r2_tree = st.session_state.get('regression_score_tree')
+    feat_rf = st.session_state.get('feature_importance_rf')
+    r2_rf = st.session_state.get('regression_score_rf')
+    
+    # Export Excel
+    def to_excel(df):
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Combinaisons')
+        return output.getvalue()
+    
+    col_export1, col_export2, col_export3 = st.columns([2, 1, 1])
+    with col_export1:
+        st.download_button(
+            label="📥 TÉLÉCHARGER TOUTES LES COMBINAISONS (Excel)",
+            data=to_excel(df_comb),
+            file_name="combinaisons_bullwhip_complete.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary"
+        )
+    with col_export2:
+        st.metric("Simulations", f"{len(df_comb):,}")
+    with col_export3:
+        nb_params = len([c for c in df_comb.columns if c not in ['marge_nette', 'service_level', 'ca_total', 'ventes_totales', 'demande_totale']])
+        st.metric("Paramètres", str(nb_params))
+    
+    st.markdown("---")
+    
+    # ===== IMPORTANCE DES PARAMÈTRES =====
+    st.markdown("### 🎯 Quels Paramètres Impactent le Plus la Marge ?")
+    
+    col_model1, col_model2 = st.columns(2)
+    
+    with col_model1:
+        st.markdown(f"#### 🌲 Decision Tree - R² = **{r2_tree:.3f}**")
+        st.dataframe(feat_tree, use_container_width=True, hide_index=True)
+        
+        fig_tree = px.bar(
+            feat_tree, 
+            x='Importance', 
+            y='Paramètre',
+            orientation='h',
+            title="Decision Tree - Importance des Paramètres",
+            color='Importance',
+            color_continuous_scale='Greens'
+        )
+        fig_tree.update_layout(height=500)
+        st.plotly_chart(fig_tree, use_container_width=True)
+    
+    with col_model2:
+        st.markdown(f"#### 🌳 Random Forest - R² = **{r2_rf:.3f}**")
+        st.dataframe(feat_rf, use_container_width=True, hide_index=True)
+        
+        fig_rf = px.bar(
+            feat_rf, 
+            x='Importance', 
+            y='Paramètre',
+            orientation='h',
+            title="Random Forest - Importance des Paramètres",
+            color='Importance',
+            color_continuous_scale='Blues'
+        )
+        fig_rf.update_layout(height=500)
+        st.plotly_chart(fig_rf, use_container_width=True)
+    
+    # ===== STATISTIQUES =====
+    st.markdown("---")
+    st.markdown("### 📈 Distribution de la Marge Nette")
+    
+    col_d1, col_d2, col_d3, col_d4 = st.columns(4)
+    
+    with col_d1:
+        st.metric("Marge Moyenne", f"{df_comb['marge_nette'].mean():.1f} K€")
+    with col_d2:
+        st.metric("Marge Max", f"{df_comb['marge_nette'].max():.1f} K€")
+    with col_d3:
+        st.metric("Marge Min", f"{df_comb['marge_nette'].min():.1f} K€")
+    with col_d4:
+        st.metric("Écart-Type", f"{df_comb['marge_nette'].std():.1f} K€")
+    
+    # ===== GRAPHIQUES =====
+    col_hist1, col_hist2 = st.columns(2)
+    
+    with col_hist1:
+        fig_hist = px.histogram(
+            df_comb, 
+            x='marge_nette', 
+            nbins=50,
+            title="Distribution de la Marge Nette",
+            labels={'marge_nette': 'Marge Nette (K€)'},
+            color_discrete_sequence=['#667eea']
+        )
+        st.plotly_chart(fig_hist, use_container_width=True)
+    
+    with col_hist2:
+        fig_scatter = px.scatter(
+            df_comb,
+            x='service_level',
+            y='marge_nette',
+            color='spikiness',
+            title="Marge vs Service Level (par Spikiness)",
+            labels={'service_level': 'Service Level (%)', 'marge_nette': 'Marge (K€)'},
+            color_continuous_scale='Viridis'
+        )
+        st.plotly_chart(fig_scatter, use_container_width=True)
+    
+    # ===== TOP 10 =====
+    st.markdown("---")
+    st.markdown("### 🏆 Top 10 Meilleures Configurations")
+    
+    top10 = df_comb.nlargest(10, 'marge_nette')
+    st.dataframe(top10, use_container_width=True, hide_index=True)
+    
+    # ===== MEILLEURE CONFIG =====
+    st.markdown("---")
+    st.markdown("### 🎯 Configuration Optimale")
+    
+    best = df_comb.loc[df_comb['marge_nette'].idxmax()]
+    
+    col_b1, col_b2, col_b3, col_b4, col_b5 = st.columns(5)
+    
+    with col_b1:
+        st.markdown(f"""
+        **Stocks:**
+        - Mag: {best['stock_mag']:.0f}
+        - Ent: {best['stock_ent']:.0f}
+        - Usine: {best['stock_usi']:.0f}
+        - Frns: {best['stock_four']:.0f}
+        """)
+    with col_b2:
+        st.markdown(f"""
+        **Lead Times:**
+        - Usine: {best['lt_usine']:.0f} sem
+        - Frns: {best['lt_fournisseur']:.0f} sem
+        """)
+    with col_b3:
+        st.markdown(f"""
+        **Fréquences:**
+        - Retail: {best['freq_retail']:.0f} sem
+        - Supply: {best['freq_supply']:.0f} sem
+        """)
+    with col_b4:
+        st.markdown(f"""
+        **Demande:**
+        - Spikiness: {best['spikiness']:.0f}
+        - Durée: {best['spike_duration']:.0f} sem
+        - Panique: {best['panic']:.0f}
+        """)
+    with col_b5:
+        st.markdown(f"""
+        **Performance:**
+        - **Marge: {best['marge_nette']:.1f} K€**
+        - Service: {best['service_level']:.1f}%
+        - CA: {best['ca_total']:.1f} K€
+        """)
+
+
 
 
 # ========== VISUALISATION ==========
@@ -343,42 +739,48 @@ if st.sidebar.button("▶ LANCER SIMULATION", type="primary"):
 if 'simulation_data' in st.session_state:
     data = st.session_state['simulation_data']
     max_week = len(data) - 1
+    pv = st.session_state.get('pv', 200)
+    pc = st.session_state.get('pc', 30)
+    spk = st.session_state.get('spikiness', 1)
+    spike_dur = st.session_state.get('spike_duration', 9)
+
+
     
     st.markdown("---")
     st.subheader("🎬 Mode Pas-à-Pas - Navigation")
     
-    # Initialiser current_week
-    if 'current_week' not in st.session_state:
-        st.session_state.current_week = 0
-    
     col_nav1, col_nav2, col_nav3, col_nav4, col_nav5 = st.columns([1, 1, 3, 1, 1])
     
-    # Boutons de navigation
-    if col_nav1.button("⏮ Début", use_container_width=True):
-        st.session_state.current_week = 0
+    with col_nav1:
+        if st.button("⏮ Début", use_container_width=True):
+            st.session_state['current_week'] = 0
+            st.rerun()
     
-    if col_nav2.button("◀ Précédent", use_container_width=True):
-        st.session_state.current_week = max(0, st.session_state.current_week - 1)
+    with col_nav2:
+        if st.button("◀ Précédent", use_container_width=True):
+            if st.session_state['current_week'] > 0:
+                st.session_state['current_week'] -= 1
+                st.rerun()
     
-    if col_nav4.button("Suivant ▶", use_container_width=True):
-        st.session_state.current_week = min(max_week, st.session_state.current_week + 1)
-    
-    if col_nav5.button("Fin ⏭", use_container_width=True):
-        st.session_state.current_week = max_week
-    
-    # Slider dans col_nav3
     with col_nav3:
-        st.session_state.current_week = st.slider(
-            "Semaine",
-            0,
-            max_week,
-            st.session_state.current_week
-        )
+        current_week = st.slider("Semaine", 0, max_week, st.session_state.get('current_week', 0), key='week_slider_main')
+        st.session_state['current_week'] = current_week
     
-    current_week = st.session_state.current_week
+    with col_nav4:
+        if st.button("Suivant ▶", use_container_width=True):
+            if st.session_state['current_week'] < max_week:
+                st.session_state['current_week'] += 1
+                st.rerun()
+    
+    with col_nav5:
+        if st.button("Fin ⏭", use_container_width=True):
+            st.session_state['current_week'] = max_week
+            st.rerun()
+    
     week = data[current_week]
     lt = week['lt']
-
+    
+    st.markdown(f"## 📅 Semaine {current_week}")
     
     # ========== VISUALISATION SUPPLY CHAIN HORIZONTALE ==========
     
@@ -550,6 +952,7 @@ if 'simulation_data' in st.session_state:
             st.markdown(f"- {event}")
     else:
         st.info("Aucun événement cette semaine")
+    
     # ========== GRAPHIQUES AGRÉGÉS ==========
     
     st.markdown("---")
@@ -581,9 +984,6 @@ if 'simulation_data' in st.session_state:
     )
     
     # ========== KPIs FINANCIERS ==========
-    
-    pv = 200  # Prix vente
-    pc = 30   # Coût production
     
     total_sales = df_analysis['sales'].sum()
     total_demand = df_analysis['dem'].sum()
@@ -652,9 +1052,19 @@ if 'simulation_data' in st.session_state:
         )
         st.plotly_chart(fig_service, use_container_width=True, key='fig_service_global')
     
-    # Graphique 2: Commandes par Étage
+    # Graphique 2: Commandes par Étage + DEMANDE CLIENT
     with col_g2:
         fig_orders = go.Figure()
+        
+        # DEMANDE CLIENT en premier
+        fig_orders.add_trace(go.Scatter(
+            x=df_analysis['t'],
+            y=df_analysis['dem'],
+            mode='lines+markers',
+            name='Demande Client',
+            line=dict(color='#FF6B6B', width=3, dash='dot'),
+            marker=dict(size=6, symbol='star')
+        ))
         
         fig_orders.add_trace(go.Scatter(
             x=df_analysis['t'],
@@ -693,10 +1103,11 @@ if 'simulation_data' in st.session_state:
         ))
         
         fig_orders.update_layout(
-            title="📦 Commandes par Étage",
+            title="📦 Demande Client & Commandes par Étage",
             xaxis_title="Semaine",
             yaxis_title="Quantité",
-            height=400
+            height=400,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         st.plotly_chart(fig_orders, use_container_width=True, key='fig_orders_global')
     
@@ -765,7 +1176,8 @@ if 'simulation_data' in st.session_state:
             'Stock Final (unités)',
             'Coût Stock Final',
             'Marge Absolue',
-            'Marge %'
+            'Marge %',
+            'Spikiness Demande'
         ],
         'Valeur': [
             f"{int(total_demand):,} pcs",
@@ -777,7 +1189,8 @@ if 'simulation_data' in st.session_state:
             f"{int(stock_final_total):,} pcs",
             f"{cout_stock_final:.1f} K€",
             f"{marge_absolue:.1f} K€",
-            f"{marge_pct:.1f}%"
+            f"{marge_pct:.1f}%",
+            f"{spk} / 4"
         ]
     }
     
@@ -799,11 +1212,8 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; padding: 20px;'>
-    <p><strong>Simulateur Bullwhip - Mode Pas-à-Pas v2.0</strong></p>
-    <p>✅ Weighted Moving Average | ✅ Supply Chain Horizontale | ✅ Flux Visibles | ✅ KPIs Financiers</p>
+    <p><strong>Simulateur Bullwhip - Mode Pas-à-Pas v4.0</strong></p>
+    <p>✅ Spikiness Demande | ✅ Demande Client Visible | ✅ Export Excel | ✅ Régression Linéaire + Tree | ✅ Feature Importance</p>
 </div>
 """, unsafe_allow_html=True)
-
-
-
 

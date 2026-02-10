@@ -347,38 +347,38 @@ if 'simulation_data' in st.session_state:
     st.markdown("---")
     st.subheader("🎬 Mode Pas-à-Pas - Navigation")
     
+    # Initialiser current_week
+    if 'current_week' not in st.session_state:
+        st.session_state.current_week = 0
+    
     col_nav1, col_nav2, col_nav3, col_nav4, col_nav5 = st.columns([1, 1, 3, 1, 1])
     
-    with col_nav1:
-        if st.button("⏮ Début", use_container_width=True):
-            st.session_state['current_week'] = 0
-            st.rerun()
+    # Boutons de navigation
+    if col_nav1.button("⏮ Début", use_container_width=True):
+        st.session_state.current_week = 0
     
-    with col_nav2:
-        if st.button("◀ Précédent", use_container_width=True):
-            if st.session_state['current_week'] > 0:
-                st.session_state['current_week'] -= 1
-                st.rerun()
+    if col_nav2.button("◀ Précédent", use_container_width=True):
+        st.session_state.current_week = max(0, st.session_state.current_week - 1)
     
+    if col_nav4.button("Suivant ▶", use_container_width=True):
+        st.session_state.current_week = min(max_week, st.session_state.current_week + 1)
+    
+    if col_nav5.button("Fin ⏭", use_container_width=True):
+        st.session_state.current_week = max_week
+    
+    # Slider dans col_nav3
     with col_nav3:
-        current_week = st.slider("Semaine", 0, max_week, st.session_state.get('current_week', 0), key='week_slider_main')
-        st.session_state['current_week'] = current_week
+        st.session_state.current_week = st.slider(
+            "Semaine",
+            0,
+            max_week,
+            st.session_state.current_week
+        )
     
-    with col_nav4:
-        if st.button("Suivant ▶", use_container_width=True):
-            if st.session_state['current_week'] < max_week:
-                st.session_state['current_week'] += 1
-                st.rerun()
-    
-    with col_nav5:
-        if st.button("Fin ⏭", use_container_width=True):
-            st.session_state['current_week'] = max_week
-            st.rerun()
-    
+    current_week = st.session_state.current_week
     week = data[current_week]
     lt = week['lt']
-    
-    st.markdown(f"## 📅 Semaine {current_week}")
+
     
     # ========== VISUALISATION SUPPLY CHAIN HORIZONTALE ==========
     
@@ -803,6 +803,7 @@ st.markdown("""
     <p>✅ Weighted Moving Average | ✅ Supply Chain Horizontale | ✅ Flux Visibles | ✅ KPIs Financiers</p>
 </div>
 """, unsafe_allow_html=True)
+
 
 
 

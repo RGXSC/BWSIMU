@@ -749,38 +749,56 @@ if 'simulation_data' in st.session_state:
     st.markdown("---")
     st.subheader("🎬 Mode Pas-à-Pas - Navigation")
     
+    # Initialize
+    if 'current_week' not in st.session_state:
+        st.session_state['current_week'] = 0
+
+    # Callback functions
+    def go_to_start():
+        st.session_state['current_week'] = 0
+
+    def go_previous():
+        if st.session_state['current_week'] > 0:
+            st.session_state['current_week'] -= 1
+
+    def go_next():
+        if st.session_state['current_week'] < max_week:
+            st.session_state['current_week'] += 1
+
+    def go_to_end():
+        st.session_state['current_week'] = max_week
+
+    # Buttons with callbacks
     col_nav1, col_nav2, col_nav3, col_nav4, col_nav5 = st.columns([1, 1, 3, 1, 1])
-    
+
     with col_nav1:
-        if st.button("⏮ Début", use_container_width=True):
-            st.session_state['current_week'] = 0
-            st.rerun()
-    
+        st.button("⏮ Début", on_click=go_to_start, use_container_width=True)
+
     with col_nav2:
-        if st.button("◀ Précédent", use_container_width=True):
-            if st.session_state['current_week'] > 0:
-                st.session_state['current_week'] -= 1
-                st.rerun()
-    
+        st.button("◀ Précédent", on_click=go_previous, use_container_width=True)
+
     with col_nav3:
-        current_week = st.slider("Semaine", 0, max_week, st.session_state.get('current_week', 0), key='week_slider_main')
-        st.session_state['current_week'] = current_week
-    
+        st.slider(
+            "Semaine", 
+            0, 
+            max_week, 
+            key='current_week',  # Bind directly to session state
+            label_visibility="visible"
+        )
+
     with col_nav4:
-        if st.button("Suivant ▶", use_container_width=True):
-            if st.session_state['current_week'] < max_week:
-                st.session_state['current_week'] += 1
-                st.rerun()
-    
+        st.button("Suivant ▶", on_click=go_next, use_container_width=True)
+
     with col_nav5:
-        if st.button("Fin ⏭", use_container_width=True):
-            st.session_state['current_week'] = max_week
-            st.rerun()
-    
-    week = data[current_week]
+        st.button("Fin ⏭", on_click=go_to_end, use_container_width=True)
+
+    # Use the week
+    week = data[st.session_state['current_week']]
+
     lt = week['lt']
     
-    st.markdown(f"## 📅 Semaine {current_week}")
+    st.markdown(f"## 📅 Semaine {st.session_state['current_week']}")
+
     
     # ========== VISUALISATION SUPPLY CHAIN HORIZONTALE ==========
     

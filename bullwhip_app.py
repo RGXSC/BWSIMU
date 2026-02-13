@@ -963,7 +963,7 @@ if 'simulation_data' in st.session_state:
     # ========== LOG DES ÉVÉNEMENTS ==========
     
     st.markdown("---")
-    st.subheader(f"📋 Événements de la Semaine {current_week}")
+    st.subheader(f"📋 Événements de la Semaine {st.session_state['current_week']}")
     
     if week['events']:
         for event in week['events']:
